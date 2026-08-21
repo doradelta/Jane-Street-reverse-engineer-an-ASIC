@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jane Street ASIC puzzle writeup</title>
+<style>
+  body { max-width: 700px; margin: 48px auto; padding: 0 16px;
+         font: 17px/1.55 Georgia, "Times New Roman", serif; color: #222; }
+  h1 { font-size: 30px; line-height: 1.2; }
+  h2 { font-size: 22px; margin-top: 40px; }
+  pre { background: #f4f4f2; border: 1px solid #ddd; padding: 12px 14px;
+        overflow-x: auto; font-size: 13.5px; line-height: 1.45; }
+  code { background: #f4f4f2; padding: 1px 4px; font-size: 15px; }
+  a { color: #0645ad; }
+  .dim { color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Reverse engineering the Jane Street ASIC</h1>
+
+<p class="dim">August 2026</p>
+
+<p>The puzzle: a file called <code>puzzle.gds</code>, which is a manufacturable chip
+layout with every internal name stripped out, and a single goal, make the
+<code>success</code> pin go high. You get a sample waveform that does not win, a hint
+image, and a warmup design with all its intermediate build files so you can test
+your tooling.</p>
+
+<p>The short version of the answer: the chip checks a Star Battle puzzle on an 11 by 11
+grid. You clock in 121 bits serially, one per cycle with <code>enable</code> high. There
+is exactly one accepted input. Feed it in and <code>success</code> goes high, and the
+chip spells this on its output bus, one character per clock:</p>
+
+<pre>(* TWO STARS *)</pre>
+
+<p>Which is a valid OCaml comment, naturally.</p>
+
+<h2>Getting a netlist out of the geometry</h2>
+
+<p>The GDS keeps standard cells as named references, so the cell types are readable, but
+all the wiring is anonymous polygons across six routing layers. I parsed everything with
+<code>gdstk</code> and rebuilt connectivity by brute geometry: two shapes on the same
+layer that touch are the same electrical net, vias connect their two layers, and inside
+every cell the pin shapes are labeled, so a wire that lands on a pin shape is connected
+to that pin. Union find over all of it produces a netlist.</p>
+
+<p>The warmup design is what makes this trustworthy. It ships with its own placed and
+routed DEF file, so I extracted my netlist from the warmup GDS and compared: all 79
+cells and all 84 nets came out identical to the reference. Then I ran the same code on
+the real thing: 1,618 cells, 713 nets, 92 flip flops.</p>
+
+<h2>A small simulator</h2>
+
+<p>I wrote boolean functions for the 66 sky130 cell types the design uses, checked
+against the foundry's functional Verilog, plus flip flops with async set and reset.
+Combinational logic settles in topological order, the clock steps edge by edge.
+Replaying the provided sample waveform through it matches the recorded outputs at all
+624 timestamps, bit for bit, which is what let me trust everything downstream.</p>
+
+<h2>What the logic turned out to be</h2>
+
+<p>Tracing backwards from <code>success</code>: it is one flip flop, set by a wide AND
+of pairwise conditions, all framed by a counter that repeats every 11 cycles. That
+counter is what turns the serial stream into rows of a grid. Part of the conditions
+decode into the classic Star Battle rules: two stars in every row, two in every column,
+and no two stars touching, diagonals included. The rest of the conditions hardwire
+which particular puzzle this chip was built for. That matters, because the three rules
+alone admit many grids, and the chip rejects every one of them except its own.</p>
+
+<h2>Solving it</h2>
+
+<p>Rather than decode the hardwired part by hand I unrolled the whole circuit over 121
+clocks in z3, with the input bits symbolic, starting from the state the flops really
+have after reset, and asked for <code>success = 1</code>. It answered in under a second.
+Adding a clause that blocks that answer and asking again returns unsat, so the input is
+unique. This is the grid:</p>
+
+<pre>
+row  0   . . . . . . . * . * .     00000001010
+row  1   * . . . . * . . . . .     10000100000
+row  2   . . . . . . . * . * .     00000001010
+row  3   * . * . . . . . . . .     10100000000
+row  4   . . . . * . * . . . .     00001010000
+row  5   . . * . . . . . * . .     00100000100
+row  6   . . . . * . . . . . *     00001000001
+row  7   . * . . . . * . . . .     01000010000
+row  8   . . . * . . . . . . *     00010000001
+row  9   . . . . . * . . * . .     00000100100
+row 10   . * . * . . . . . . .     01010000000
+</pre>
+
+<h2>The message, and the bug that hid it</h2>
+
+<p>The hint image marks a region as the output generator and says you can ignore it
+while reverse engineering. It turns out to be an 8 bit linear feedback shift register
+that hashes the input stream as it goes by, plus logic that turns its final value into
+characters. Three inputs get a message of their own: the winning grid gets
+<code>(* TWO STARS *)</code>, all zeros gets <code>EMPTY SKY</code>, all ones gets
+<code>BIG BANG</code>. Everything else gets <code>TRY AGAIN</code>.</p>
+
+<p>This part cost me the most time, for a silly reason. Four of the flip flops seeding
+that LFSR power up as 1 through an async set. A typo in my simulator meant that branch
+never ran, so they started at 0 and the winning grid produced garbage on the bus. Every
+test still passed, because the sample waveform never exercises those four flops. The fix
+was one line.</p>
+
+<h2>Checking it</h2>
+
+<p>Everything above can be rerun from the <code>re</code> folder:</p>
+
+<pre>
+python3 extract.py ../asic-puzzle-2026/puzzle.gds puzzle_netlist.json
+python3 verify.py unique
+</pre>
+
+<p>The second command rechecks the grid constraints, simulates the chip on the winning
+grid and the easter eggs, verifies the reset state, runs the warmup netlist as an adder
+to confirm extraction works functionally, and redoes the z3 uniqueness proof.
+<code>winning_inputs.vcd</code> records the inputs together with the expected outputs,
+and replaying it through the simulator matches at all 285 timestamps.</p>
+
+<p>I also put together <a href="playground.html">playground.html</a>, where the
+extracted netlist runs live in the browser so you can try grids against the actual
+circuit, and the die can be explored in 3D, layer by layer.</p>
+
+</body>
+</html>
