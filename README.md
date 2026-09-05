@@ -85,9 +85,24 @@ The last one replays [re/winning_inputs.vcd](re/winning_inputs.vcd), which recor
 inputs and expected outputs, and matches 285/285 timestamps. Regenerate it with
 [re/make_winning_vcd.py](re/make_winning_vcd.py).
 
+## The same solve in OCaml
+
+[ocaml/](ocaml/) is a from-scratch port of the whole pipeline to OCaml, standard library
+only: its own GDSII reader, exact integer geometry, the simulator, the DEF and VCD checks,
+and the z3 proof through SMT-LIB. It extracts the identical netlist (same 1618 instances
+and 713 nets, pin for pin) in about 50 ms, and `asicre solve puzzle.gds` goes from raw
+geometry to the unique winning grid in about a second.
+
+```bash
+cd ocaml && dune build && cd ..
+ocaml/_build/default/bin/asicre.exe solve asic-puzzle-2026/puzzle.gds
+ocaml/check_all.sh          # every check above, OCaml edition
+```
+
 ## What is where
 
 * The [puzzle folder](asic-puzzle-2026/) holds the official files: the GDS, the sample
   waveform and the warmup design.
 * [re/](re/) holds the solve: extraction, simulator, solvers, verification and the
   writeup page.
+* [ocaml/](ocaml/) holds the OCaml port of the solve, with its own [README](ocaml/README.md).

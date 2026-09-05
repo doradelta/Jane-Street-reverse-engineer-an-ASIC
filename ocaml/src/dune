@@ -1,0 +1,3 @@
+(library
+ (name asic)
+ (libraries unix str))
